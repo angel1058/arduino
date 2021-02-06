@@ -2,107 +2,107 @@
 #include <Ethernet.h>
 #include <PubSubClient.h>
 
-#define SENSOR 16
-#define TRIGGER 2
-#define ECHO 4
 
-RTC_DATA_ATTR int bootCount = 0;
-RTC_DATA_ATTR int successCount = 0;
-RTC_DATA_ATTR unsigned long lastRunMicros = 0;
-#define uS_TO_S_FACTOR 1000000ULL  
-#define TIME_TO_SLEEP  60        
-
-
-int FULL = 1400;
-int sleepy = 0;
-const char* ssid = "Phobos"; //Enter SSID
-const char* password = "1058Dr460n!"; //Enter Password
-const char* mqqtUser = "SONOFF"; //Enter SSID
-const char* mqqtBroker = "192.168.1.97";
-
-WiFiClient espClient;
-
+#include "variables.h"
+#include "defines.h"
+#include "sensor.h"
+#include "debug.h"
 void callBack(char* topic, byte* payload, unsigned int length) {
   // handle message arrived
 }
 
+
 PubSubClient mqttClient(mqqtBroker , 1883 , callBack , espClient);
-unsigned long startTime;
-unsigned long stopTime;
 
-void setup() {
+void setup() 
+{
+  Serial.begin(115200);
+  log("start time : " + String(startTime));
   startTime = millis();
+  log("start time : " + String(startTime));
   ++bootCount;
+Serial.println("=================================");
+Serial.println("bootCount:" + String(bootCount));
+Serial.println("wifiFail:" + String(wifiFail));
+Serial.println("mqqtFail:" + String(mqqtFail));
+Serial.println("skipCount:"+ String(skipCount));
+Serial.println("lastRunMicros:" + String(lastRunMicros));
+Serial.println("oldValue:" + String(oldValue));
+Serial.println("=================================");
+  
   sleepy = TIME_TO_SLEEP;
-  if ( bootCount > 10)
-    sleepy = 60*60*3;
- 
-   takeMeasurement();
 
+  if ( bootCount > QUICK_SHOT)
+    sleepy = ONE_HOUR;
+ 
+  if ( !takeMeasurement())
+  {
+  sleepy = TIME_TO_SLEEP;
+  }
+  stopTime = millis();
   lastRunMicros = stopTime - startTime;
+  log("stopTime time : " + String(stopTime));
+  log("elapsed : " + String(lastRunMicros));
 }
 
-void publish(int remaining)
+bool publish(int remaining)
 {
-      
+    if (!SetupWifi())
+    {
+      log("FAILED TO SETUP WIFI");
+      wifiFail++;
+      return false;
+    }
+
     if (!mqttClient.connect("client" , mqqtUser , password))
     {
-      stopTime = millis();
-      return;
+      log("FAILED TO OPEN MQ");
+      mqqtFail++;
+      return false;
     }
-    char val[8];char val1[8];
+   else
+   {
+    log("MQ open");
+   }
 
-    ++successCount;
-
-  String msg= "{\"runTime\": \""+String(lastRunMicros)+"\", \"level\": \""+String(remaining)+"\", \"bootCount\": \""+String(bootCount)+"\", \"failCount\": \""+String(bootCount - successCount)+"\", \"sleepDelay\": \""+String(sleepy)+"\"}";
-
-  mqttClient.publish("esp/oil/liters" , msg.c_str());
-  mqttClient.disconnect();
-  stopTime = millis();
-}
-
-
-void SetupWifi()
+    String msg= "{\"wifiFail\": \""+String(wifiFail)+"\", "+
+                  "\"mqqtFail\": \""+String(mqqtFail)+"\", "+
+                  "\"skipCount\": \""+String(skipCount)+"\", "+
+                  "\"runTime\": \""+String(lastRunMicros)+"\", "+
+                  "\"level\": \""+String(remaining)+"\", "+
+                  "\"bootCount\": \""+String(bootCount)+"\", "+
+                  "\"sleepDelay\": \""+String(sleepy)+"\"}";
+log(msg);
+    mqttClient.publish("esp/oil/liters" , msg.c_str()  , true);
+    mqttClient.disconnect();
+    skipCount = 0;
+    return true;
+ }
+ 
+bool SetupWifi()
 {
   //Serial.println("Connecting..");
     WiFi.begin(ssid, password);
+
+  int failedCount = 0;
+  
   while (WiFi.status() != WL_CONNECTED)
   {
-    delay(100);
- //   Serial.print(".");
+    failedCount++;
+    delay(500);
+
+    if ( failedCount > 10)
+    {
+
+      return false;
+    }
   }
 
 //  Serial.println("");
  // Serial.println("WiFi connection Successful");
-
+return true;
 }
 
-void powerUpSensor()
-{
-//  Serial.println("Powering up sensor");
-  digitalWrite(SENSOR , HIGH);
-}
-
-void powerDownSensor()
-{
-//  Serial.println("Powering down sensor");
-  digitalWrite(SENSOR , LOW);
-}
-
-int readFromSensor()
-{
-  digitalWrite(TRIGGER, LOW);
-  delayMicroseconds(3);
-  digitalWrite(TRIGGER, HIGH);
-  delayMicroseconds(20);
-  digitalWrite(TRIGGER, LOW);
-  long duration = pulseIn(ECHO, HIGH );
-  //Calculate the dwqwistance:
-  int distance = duration * 0.034 / 2;
-  Serial.println(distance);
-
-  return distance;
-}
 
 int calculateLitresRemaining(int level)
 {
@@ -112,37 +112,67 @@ int calculateLitresRemaining(int level)
   return remainingLitres;
 }
 
-void takeMeasurement()
+void setupPins()
 {
-    Serial.begin(115200);
-    Serial.print("!");
-  
-    pinMode(SENSOR , OUTPUT);
+      pinMode(SENSOR , OUTPUT);
     pinMode(TRIGGER , OUTPUT);
-    pinMode(ECHO , INPUT);
+    pinMode(ECHO , INPUT_PULLUP);
+}
 
-    powerUpSensor();
-    SetupWifi();
-    int distance = readFromSensor();
-    powerDownSensor();
-  Serial.println("d : " + String(distance) );
+bool takeMeasurement()
+{
+  setupPins();
+    
+
+int zeroReadTime = 0;
+ int distance = 0;
+      while ( distance == 0)
+      {
+        distance = sensorRead();
+        if( distance == 0 )
+        {
+          if ( zeroReadTime++ >=5)
+            return false;
+      
+            log("ZERO DISTANCE");
+       
+        }
+      }
+   
     int litresRemaining = calculateLitresRemaining(distance);
-  Serial.println("r : " + String(litresRemaining) );
 
-    publish(litresRemaining);
-//    Serial.println("#");
+    log("d : " + String(distance) );
+    log("r : " + String(litresRemaining) );
+    log("old : " + String(oldValue) );
+
+
+
+    if ( ++skipCount == 5 || litresRemaining != oldValue || 1==1)
+    {
+        log("Sending new value");
+        oldValue = litresRemaining;
+        return publish(litresRemaining);
+    }
+    else
+    {
+
+     log("value not changed : " + String(skipCount));
+
+      return true;
+    }
 }
 
 
+
+
+
+
+
 void loop() {
-
-
-   
-  
- 
-esp_sleep_enable_timer_wakeup(sleepy * 1000000ULL);
-//  Serial.println("Going to sleep for " + String(sleepy) +" seconds : iteration : " + String(bootCount));
-
+  esp_sleep_enable_timer_wakeup(sleepy * 1000000ULL);
+  #ifdef _DEBUG_
+  Serial.println("Going to sleep for " + String(sleepy) +" seconds : iteration : " + String(bootCount));
+  #endif
   //Go to sleep now
   esp_deep_sleep_start();
   }
